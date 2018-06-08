@@ -40,15 +40,25 @@ import android.media.AudioRecord;
 import android.media.MediaRecorder;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Debug;
+import android.os.Environment;
 import android.util.Log;
 import android.view.View;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.ListView;
+
+
 import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.FileWriter;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.locks.ReentrantLock;
 import org.tensorflow.contrib.android.TensorFlowInferenceInterface;
@@ -74,6 +84,8 @@ public class SpeechActivity extends Activity {
   private static final long MINIMUM_TIME_BETWEEN_SAMPLES_MS = 30;
   private static final String LABEL_FILENAME = "file:///android_asset/conv_actions_labels.txt";
   private static final String MODEL_FILENAME = "file:///android_asset/conv_actions_frozen.pb";
+  private static final String SMALL_LABEL_FILENAME = "file:///android_asset/conv_low_labels.txt";
+  private static final String SMALL_MODEL_FILENAME = "file:///android_asset/conv_low.pb";
   private static final String INPUT_DATA_NAME = "decoded_sample_data:0";
   private static final String SAMPLE_RATE_NAME = "decoded_sample_data:1";
   private static final String OUTPUT_SCORES_NAME = "labels_softmax";
@@ -93,9 +105,14 @@ public class SpeechActivity extends Activity {
   private Thread recognitionThread;
   private final ReentrantLock recordingBufferLock = new ReentrantLock();
   private TensorFlowInferenceInterface inferenceInterface;
+  private TensorFlowInferenceInterface smallInferenceInterface;
   private List<String> labels = new ArrayList<String>();
   private List<String> displayedLabels = new ArrayList<>();
   private RecognizeCommands recognizeCommands = null;
+  private List<float[]> wavs = null;
+  private List<String> label = null;
+  private int recognizedCounter = 0;
+  private int totalCounter = 0;
 
   @Override
   protected void onCreate(Bundle savedInstanceState) {
@@ -151,10 +168,24 @@ public class SpeechActivity extends Activity {
     // Load the TensorFlow model.
     inferenceInterface = new TensorFlowInferenceInterface(getAssets(), MODEL_FILENAME);
 
+    smallInferenceInterface = new TensorFlowInferenceInterface(getAssets(), SMALL_MODEL_FILENAME);
     // Start the recording and recognition threads.
-    requestMicrophonePermission();
-    startRecording();
-    startRecognition();
+
+//    requestMicrophonePermission();
+//    startRecording();
+
+    readWavs();
+
+    Button startButton = (Button) findViewById(R.id.start);
+
+    startButton.setEnabled(true);
+    startButton.setOnClickListener(new View.OnClickListener() {
+      @Override
+      public void onClick(View view) {
+        startRecognition();
+      }
+    });
+
   }
 
   private void requestMicrophonePermission() {
@@ -170,8 +201,8 @@ public class SpeechActivity extends Activity {
     if (requestCode == REQUEST_RECORD_AUDIO
         && grantResults.length > 0
         && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-      startRecording();
-      startRecognition();
+//      startRecording();
+//      startRecognition();
     }
   }
 
@@ -276,79 +307,217 @@ public class SpeechActivity extends Activity {
     recognitionThread = null;
   }
 
-  private void recognize() {
-    Log.v(LOG_TAG, "Start recognition");
-
-    short[] inputBuffer = new short[RECORDING_LENGTH];
-    float[] floatInputBuffer = new float[RECORDING_LENGTH];
-    float[] outputScores = new float[labels.size()];
-    String[] outputScoresNames = new String[] {OUTPUT_SCORES_NAME};
-    int[] sampleRateList = new int[] {SAMPLE_RATE};
-
-    // Loop, grabbing recorded data and running the recognition model on it.
-    while (shouldContinueRecognition) {
-      // The recording thread places data in this round-robin buffer, so lock to
-      // make sure there's no writing happening and then copy it to our own
-      // local version.
-      recordingBufferLock.lock();
+  private void readWavs() {
+    String[] waveFiles = null;
+    try{
+      waveFiles = getAssets().list("wavs");
+    } catch (IOException e) {
+      e.printStackTrace();
+    }
+    wavs = new ArrayList<>();
+//    label = new ArrayList();
+    Log.d("WaveFiles", String.valueOf(waveFiles.length));
+    for (String waveFile: waveFiles) {
+      InputStream audioFile;
+      byte[] newInputBuffer = new byte[RECORDING_LENGTH * 2];
+      float[] newFloatInputBuffer = new float[RECORDING_LENGTH];
       try {
-        int maxLength = recordingBuffer.length;
-        int firstCopyLength = maxLength - recordingOffset;
-        int secondCopyLength = recordingOffset;
-        System.arraycopy(recordingBuffer, recordingOffset, inputBuffer, 0, firstCopyLength);
-        System.arraycopy(recordingBuffer, 0, inputBuffer, firstCopyLength, secondCopyLength);
-      } finally {
-        recordingBufferLock.unlock();
+        audioFile = getAssets().open("wavs/" + waveFile);
+        audioFile.skip(44);
+        audioFile.read(newInputBuffer);
+      } catch (FileNotFoundException e) {
+        e.printStackTrace();
+      } catch (IOException e) {
+        e.printStackTrace();
       }
 
-      // We need to feed in float values between -1.0f and 1.0f, so divide the
-      // signed 16-bit inputs.
-      for (int i = 0; i < RECORDING_LENGTH; ++i) {
-        floatInputBuffer[i] = inputBuffer[i] / 32767.0f;
+      for (int i = 0; i < RECORDING_LENGTH; i++) {
+        short newNum = (short) (newInputBuffer[2 * i] + (newInputBuffer[2 * i + 1] << 8));
+        float newFloatNum = newNum / 32767.0f;
+        newFloatInputBuffer[i] = newFloatNum;
       }
-
-      // Run the model.
-      inferenceInterface.feed(SAMPLE_RATE_NAME, sampleRateList);
-      inferenceInterface.feed(INPUT_DATA_NAME, floatInputBuffer, RECORDING_LENGTH, 1);
-      inferenceInterface.run(outputScoresNames);
-      inferenceInterface.fetch(OUTPUT_SCORES_NAME, outputScores);
-
-      // Use the smoother to figure out if we've had a real recognition event.
-      long currentTime = System.currentTimeMillis();
-      final RecognizeCommands.RecognitionResult result =
-          recognizeCommands.processLatestResults(outputScores, currentTime);
-
-      runOnUiThread(
-          new Runnable() {
-            @Override
-            public void run() {
-              // If we do have a new command, highlight the right list entry.
-              if (!result.foundCommand.startsWith("_") && result.isNewCommand) {
-                int labelIndex = -1;
-                for (int i = 0; i < labels.size(); ++i) {
-                  if (labels.get(i).equals(result.foundCommand)) {
-                    labelIndex = i;
-                  }
-                }
-                final View labelView = labelsListView.getChildAt(labelIndex - 2);
-
-                AnimatorSet colorAnimation =
-                    (AnimatorSet)
-                        AnimatorInflater.loadAnimator(
-                            SpeechActivity.this, R.animator.color_animation);
-                colorAnimation.setTarget(labelView);
-                colorAnimation.start();
-              }
-            }
-          });
-      try {
-        // We don't need to run too frequently, so snooze for a bit.
-        Thread.sleep(MINIMUM_TIME_BETWEEN_SAMPLES_MS);
-      } catch (InterruptedException e) {
-        // Ignore
+      wavs.add(newFloatInputBuffer);
+//      label.add(waveFile.split("_")[0]);
+    }
+  }
+  private void appendLog(String text)
+  {
+    File logFile = new File(Environment.getExternalStorageDirectory() + "/totalcount.log");
+    if (!logFile.exists())
+    {
+      try
+      {
+        logFile.createNewFile();
+      }
+      catch (IOException e)
+      {
+        // TODO Auto-generated catch block
+        e.printStackTrace();
       }
     }
+    try
+    {
+      //BufferedWriter for performance, true to set append to file flag
+      BufferedWriter buf = new BufferedWriter(new FileWriter(logFile, true));
+      buf.append(text);
+      buf.newLine();
+      buf.close();
+    }
+    catch (IOException e)
+    {
+      // TODO Auto-generated catch block
+      e.printStackTrace();
+    }
+  }
+  private void recognize() {
+    final String RECOG_TAG = "HotWordDetection";
+    Log.v(RECOG_TAG, "Start recognition");
+    long cpuTime = Debug.threadCpuTimeNanos();
+    Log.v("CPU Time", String.valueOf(cpuTime));
+//    Debug.startMethodTracingSampling("bigLITTLE05-sample", 8192, 1000);
+//    short[] inputBuffer = new short[RECORDING_LENGTH];
+//    float[] floatInputBuffer = new float[RECORDING_LENGTH];
+    float[] outputScores = new float[labels.size()];
+//    float[] outputScores = new float[10];
+    String[] outputScoresNames = new String[]{OUTPUT_SCORES_NAME};
+    int[] sampleRateList = new int[]{SAMPLE_RATE};
 
-    Log.v(LOG_TAG, "End recognition");
+    while (true) {
+      for (float[] newFloatInputBuffer : wavs) {
+//        smallInferenceInterface.feed(SAMPLE_RATE_NAME, sampleRateList);
+//        smallInferenceInterface.feed(INPUT_DATA_NAME, newFloatInputBuffer, RECORDING_LENGTH, 1);
+//        smallInferenceInterface.run(outputScoresNames);
+//        smallInferenceInterface.fetch(OUTPUT_SCORES_NAME, outputScores);
+//        Log.d("SmallOutputScore", "Score: " + Arrays.toString(outputScores));
+
+//        float threshold = recognizeCommands.getThreshold(outputScores);
+
+//        Log.d("Threshold", String.valueOf(threshold));
+
+
+//        if (threshold < 0.3) {
+        inferenceInterface.feed(SAMPLE_RATE_NAME, sampleRateList);
+        inferenceInterface.feed(INPUT_DATA_NAME, newFloatInputBuffer, RECORDING_LENGTH, 1);
+        inferenceInterface.run(outputScoresNames);
+        inferenceInterface.fetch(OUTPUT_SCORES_NAME, outputScores);
+//        Log.d("Big", "big!!");
+        Log.d("HotWordDetection", "Score: " + Arrays.toString(outputScores));
+//        }
+        totalCounter++;
+        appendLog(String.valueOf(totalCounter));
+
+
+
+        // Use the smoother to figure out if we've had a real recognition event.
+//      long currentTime = System.currentTimeMillis();
+        final RecognizeCommands.RecognitionResult result =
+            recognizeCommands.getLatestResult(outputScores);
+
+        if (result.foundCommand.equals("stop")) {
+          recognizedCounter++;
+        }
+//              recognizeCommands.processLatestResults(outputScores, currentTime);
+//      runOnUiThread(
+//              new Runnable() {
+//                @Override
+//                public void run() {
+//                  // If we do have a new command, highlight the right list entry.
+//                  if (!result.foundCommand.startsWith("_") && result.isNewCommand) {
+//                    int labelIndex = -1;
+//                    for (int i = 0; i < labels.size(); ++i) {
+//                      if (labels.get(i).equals(result.foundCommand)) {
+//                        labelIndex = i;
+//                      }
+//                    }
+//                    final View labelView = labelsListView.getChildAt(labelIndex - 2);
+//                    Log.v("Recognized!", result.foundCommand);
+//                    recognizedCounter++;
+//                    AnimatorSet colorAnimation =
+//                            (AnimatorSet)
+//                                    AnimatorInflater.loadAnimator(
+//                                            SpeechActivity.this, R.animator.color_animation);
+//                    colorAnimation.setTarget(labelView);
+//                    colorAnimation.start();
+//                  }
+//                }
+//              });
+        try {
+          // We don't need to run too frequently, so snooze for a bit.
+          Thread.sleep(MINIMUM_TIME_BETWEEN_SAMPLES_MS);
+        } catch (InterruptedException e) {
+          // Ignore
+        }
+      }
+
+      cpuTime = Debug.threadCpuTimeNanos();
+      Log.v(RECOG_TAG, "Inferred   until now: " + String.valueOf(totalCounter));
+      Log.v(RECOG_TAG, "Recognized until now: " + String.valueOf(recognizedCounter));
+      Log.v("CPU Time", String.valueOf(cpuTime));
+    }
+
+    // Loop, grabbing recorded data and running the recognition model on it.
+//    while (shouldContinueRecognition) {
+//      // The recording thread places data in this round-robin buffer, so lock to
+//      // make sure there's no writing happening and then copy it to our own
+//      // local version.
+//      recordingBufferLock.lock();
+//      try {
+//        int maxLength = recordingBuffer.length;
+//        int firstCopyLength = maxLength - recordingOffset;
+//        int secondCopyLength = recordingOffset;
+//        System.arraycopy(recordingBuffer, recordingOffset, inputBuffer, 0, firstCopyLength);
+//        System.arraycopy(recordingBuffer, 0, inputBuffer, firstCopyLength, secondCopyLength);
+//      } finally {
+//        recordingBufferLock.unlock();
+//      }
+//
+//      // We need to feed in float values between -1.0f and 1.0f, so divide the
+//      // signed 16-bit inputs.
+//      for (int i = 0; i < RECORDING_LENGTH; ++i) {
+//        floatInputBuffer[i] = inputBuffer[i] / 32767.0f;
+//      }
+//
+//      // Run the model.
+//      inferenceInterface.feed(SAMPLE_RATE_NAME, sampleRateList);
+//      inferenceInterface.feed(INPUT_DATA_NAME, floatInputBuffer, RECORDING_LENGTH, 1);
+//      inferenceInterface.run(outputScoresNames);
+//      inferenceInterface.fetch(OUTPUT_SCORES_NAME, outputScores);
+//
+//      // Use the smoother to figure out if we've had a real recognition event.
+//      long currentTime = System.currentTimeMillis();
+//      final RecognizeCommands.RecognitionResult result =
+//          recognizeCommands.processLatestResults(outputScores, currentTime);
+//
+//      runOnUiThread(
+//          new Runnable() {
+//            @Override
+//            public void run() {
+//              // If we do have a new command, highlight the right list entry.
+//              if (!result.foundCommand.startsWith("_") && result.isNewCommand) {
+//                int labelIndex = -1;
+//                for (int i = 0; i < labels.size(); ++i) {
+//                  if (labels.get(i).equals(result.foundCommand)) {
+//                    labelIndex = i;
+//                  }
+//                }
+//                final View labelView = labelsListView.getChildAt(labelIndex - 2);
+//                Log.v("Recognized!", result.foundCommand);
+//                AnimatorSet colorAnimation =
+//                    (AnimatorSet)
+//                        AnimatorInflater.loadAnimator(
+//                            SpeechActivity.this, R.animator.color_animation);
+//                colorAnimation.setTarget(labelView);
+//                colorAnimation.start();
+//              }
+//            }
+//          });
+//      try {
+//        // We don't need to run too frequently, so snooze for a bit.
+//        Thread.sleep(MINIMUM_TIME_BETWEEN_SAMPLES_MS);
+//      } catch (InterruptedException e) {
+//        // Ignore
+//      }
+//    }
+//    Debug.stopMethodTracing();
   }
 }

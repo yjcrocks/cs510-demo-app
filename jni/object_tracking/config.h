@@ -18,7 +18,8 @@ limitations under the License.
 
 #include <math.h>
 
-#include "tensorflow/examples/android/jni/object_tracking/geom.h"
+// #include "geom.h"
+#include "geom.h"
 
 namespace tf_tracking {
 

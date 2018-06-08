@@ -97,6 +97,39 @@ public class RecognizeCommands {
     }
   }
 
+  public float getThreshold(float[] currentResults) {
+    // Sort the averaged results in descending score order.
+    ScoreForSorting[] sortedAverageScores = new ScoreForSorting[labelsCount];
+    for (int i = 0; i < labelsCount; ++i) {
+      sortedAverageScores[i] = new ScoreForSorting(currentResults[i], i);
+    }
+    Arrays.sort(sortedAverageScores);
+
+    // See if the latest top score is enough to trigger a detection.
+    final int currentTopIndex = sortedAverageScores[0].index;
+//    final String currentTopLabel = labels.get(currentTopIndex);
+    final float currentTopScore = sortedAverageScores[0].score;
+
+    final int nextTopIndex = sortedAverageScores[1].index;
+    final float nextTopScore = sortedAverageScores[1].score;
+
+    return currentTopScore - nextTopScore;
+  }
+
+  public RecognitionResult getLatestResult(float[] currentResults) {
+    ScoreForSorting[] sortedAverageScores = new ScoreForSorting[labelsCount];
+    for (int i = 0; i < labelsCount; ++i) {
+      sortedAverageScores[i] = new ScoreForSorting(currentResults[i], i);
+    }
+    Arrays.sort(sortedAverageScores);
+
+    // See if the latest top score is enough to trigger a detection.
+    final int currentTopIndex = sortedAverageScores[0].index;
+    final String currentTopLabel = labels.get(currentTopIndex);
+    final float currentTopScore = sortedAverageScores[0].score;
+    return new RecognitionResult(currentTopLabel, currentTopScore, true);
+  }
+
   public RecognitionResult processLatestResults(float[] currentResults, long currentTimeMS) {
     if (currentResults.length != labelsCount) {
       throw new RuntimeException(

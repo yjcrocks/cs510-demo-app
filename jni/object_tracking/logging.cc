@@ -13,8 +13,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "tensorflow/examples/android/jni/object_tracking/logging.h"
-
+//#include "logging.h"
+#include "logging.h"
 #ifdef STANDALONE_DEMO_LIB
 
 #include <android/log.h>
